@@ -1,6 +1,5 @@
-From c42b27336eeffd7926a77604cdefcc8918bed926 Mon Sep 17 00:00:00 2001
 From: Matthew Leach <matthew.leach@collabora.com>
-Date: Wed, 28 Oct 2026 13:34:14 +0800
+Date: Sun, 08 Nov 2026 10:27:29 +0800
 Subject: [PATCH] wifi: ath12k: fix survey indexing across bands
 
 When running 'iw dev wlan0 survey dump' the values for the channel busy
@@ -39,11 +38,7 @@ Link: https://patch.msgid.link/20260703-ath12-survey-band-fix-v3-1-2fb050c2505a@
 Signed-off-by: Matthew Leach <matthew.leach@collabora.com>
 Signed-off-by: Jeff Johnson <jeff.johnson@oss.qualcomm.com>
 Signed-off-by: ViKing <viking.yfy@qq.com>
----
- drivers/net/wireless/ath/ath12k/core.h |  8 ++-
- drivers/net/wireless/ath/ath12k/mac.c  | 33 +++++++------
- drivers/net/wireless/ath/ath12k/wmi.c  | 68 ++++++++++++++------------
- 3 files changed, 62 insertions(+), 47 deletions(-)
+
 --- a/drivers/net/wireless/ath/ath12k/core.h
 +++ b/drivers/net/wireless/ath/ath12k/core.h
 @@ -666,7 +666,7 @@
@@ -130,19 +125,22 @@ Signed-off-by: ViKing <viking.yfy@qq.com>
  	}
  
 -	ar_survey = &ar->survey[idx];
-+	ah_survey = &ah->survey[idx];
- 
+-
 -	ath12k_mac_update_bss_chan_survey(ar, &sband->channels[idx]);
-+	ath12k_mac_update_bss_chan_survey(ar, &sband->channels[sband_idx]);
- 
+-
 -	spin_lock_bh(&ar->data_lock);
 -	memcpy(survey, ar_survey, sizeof(*survey));
 -	spin_unlock_bh(&ar->data_lock);
+-
+-	survey->channel = &sband->channels[idx];
++	ah_survey = &ah->survey[idx];
++
++	ath12k_mac_update_bss_chan_survey(ar, &sband->channels[sband_idx]);
++
 +	scoped_guard(spinlock_bh, &ah->survey_lock) {
 +		memcpy(survey, ah_survey, sizeof(*survey));
 +	}
- 
--	survey->channel = &sband->channels[idx];
++
 +	survey->channel = &sband->channels[sband_idx];
  
  	if (ar->rx_channel == survey->channel)
@@ -256,6 +254,17 @@ Signed-off-by: ViKing <viking.yfy@qq.com>
  	}
  
 -	survey = &ar->survey[idx];
+-
+-	survey->noise     = le32_to_cpu(bss_ch_info_ev.noise_floor);
+-	survey->time      = div_u64(total, cc_freq_hz);
+-	survey->time_busy = div_u64(busy, cc_freq_hz);
+-	survey->time_rx   = div_u64(rx_bss, cc_freq_hz);
+-	survey->time_tx   = div_u64(tx, cc_freq_hz);
+-	survey->filled   |= (SURVEY_INFO_NOISE_DBM |
+-			     SURVEY_INFO_TIME |
+-			     SURVEY_INFO_TIME_BUSY |
+-			     SURVEY_INFO_TIME_RX |
+-			     SURVEY_INFO_TIME_TX);
 +	scoped_guard(spinlock_bh, &ah->survey_lock) {
 +		survey = &ah->survey[idx];
 +
@@ -270,17 +279,7 @@ Signed-off-by: ViKing <viking.yfy@qq.com>
 +				   SURVEY_INFO_TIME_RX |
 +				   SURVEY_INFO_TIME_TX);
 +	}
- 
--	survey->noise     = le32_to_cpu(bss_ch_info_ev.noise_floor);
--	survey->time      = div_u64(total, cc_freq_hz);
--	survey->time_busy = div_u64(busy, cc_freq_hz);
--	survey->time_rx   = div_u64(rx_bss, cc_freq_hz);
--	survey->time_tx   = div_u64(tx, cc_freq_hz);
--	survey->filled   |= (SURVEY_INFO_NOISE_DBM |
--			     SURVEY_INFO_TIME |
--			     SURVEY_INFO_TIME_BUSY |
--			     SURVEY_INFO_TIME_RX |
--			     SURVEY_INFO_TIME_TX);
++
  exit:
 -	spin_unlock_bh(&ar->data_lock);
  	complete(&ar->bss_survey_done);

@@ -32,6 +32,7 @@
 #include <linux/rtnetlink.h>
 #include <linux/seq_file.h>
 #include <linux/sysfs.h>
+#include <linux/sizes.h>
 #include <linux/soc/qcom/qca_edma.h>
 #include <linux/soc/qcom/qca_ppe.h>
 
@@ -64,7 +65,7 @@
 #define NSS_MISC_RESET_SECOND		0x00000017
 #define NSS_MISC_RESET_SHIFT(id)	((id) << 3)
 
-#define NSS_BOOT_TIMEOUT_MS		2000
+#define NSS_BOOT_TIMEOUT_MS		5000
 
 /* Every clock the core needs, at the rate the firmware is built for. The
  * fabric clocks are shared between the two cores; a Wi-Fi data plane boots
@@ -130,6 +131,8 @@ struct nss_soc {
 	 * IPQ6018.
 	 */
 	bool level_irqs;
+	/* IPQ6018 has a processor reset outside the two clamp sets. */
+	u32 core_reset;
 };
 
 static const struct nss_soc nss_ipq8074 = {
@@ -139,6 +142,7 @@ static const struct nss_soc nss_ipq8074 = {
 
 static const struct nss_soc nss_ipq6018 = {
 	.clk = nss_clk_ipq6018,
+	.core_reset = BIT(7), /* GCC_UBI0_CORE_ARES */
 };
 
 #define NSS_CLK_COUNT	ARRAY_SIZE(nss_clk_ipq8074)
@@ -364,6 +368,14 @@ static void nss_edma_settle(struct nss_core *core)
 	u32 flags = ETH_RESET_DMA << ETH_RESET_SHARED_SHIFT;
 	int ret;
 
+	/* A WLAN-only reset leaves the core running on the other instance.
+	 * It needs no shared DMA reset and must not wait for RTNL there.
+	 * Drop the core mutex before taking RTNL, then recheck below.
+	 */
+	scoped_guard(mutex, &core->lock)
+		if (core->loaded || !core->edma_stale)
+			return;
+
 	rtnl_lock();
 	mutex_lock(&core->lock);
 	if (core->edma_stale && !core->loaded) {
@@ -395,7 +407,8 @@ static void nss_core_release(struct nss_core *core)
 	 */
 	writel(1, core->nphys + NSS_CORE_RESET_CTRL);
 	val = readl(core->misc_reset);
-	val |= (NSS_MISC_RESET_FIRST | NSS_MISC_RESET_SECOND) <<
+	val |= (NSS_MISC_RESET_FIRST | NSS_MISC_RESET_SECOND |
+		core->soc->core_reset) <<
 	       NSS_MISC_RESET_SHIFT(core->id);
 	writel(val, core->misc_reset);
 	usleep_range(10, 20);
@@ -429,6 +442,11 @@ static void nss_core_release(struct nss_core *core)
 
 	writel(NSS_CORE_IFETCH_RANGE_ADDR, core->nphys + NSS_CORE_IFETCH_RANGE);
 
+	/* Keep the IPQ6018 processor reset until its boot address is ready. */
+	val &= ~(core->soc->core_reset << NSS_MISC_RESET_SHIFT(core->id));
+	writel(val, core->misc_reset);
+	readl(core->misc_reset);
+	usleep_range(10, 20);
 	writel(0, core->nphys + NSS_CORE_RESET_CTRL);
 }
 
@@ -458,7 +476,8 @@ static void nss_core_halt(struct nss_core *core)
 	writel(1, core->nphys + NSS_CORE_RESET_CTRL);
 
 	val = readl(core->misc_reset);
-	val |= NSS_MISC_RESET_SECOND << NSS_MISC_RESET_SHIFT(core->id);
+	val |= (NSS_MISC_RESET_SECOND | core->soc->core_reset) <<
+	       NSS_MISC_RESET_SHIFT(core->id);
 	writel(val, core->misc_reset);
 
 	/* The same settle the release path needs between the two sets. */
@@ -471,7 +490,10 @@ static void nss_core_halt(struct nss_core *core)
 	 * rings and the lent table go below.
 	 */
 	scoped_guard(mutex, &core->msg.lock) {
-		core->running = false;
+		scoped_guard(spinlock_bh, &core->state_lock) {
+			core->booting = false;
+			core->running = false;
+		}
 		core->msg.lost = false;
 	}
 	synchronize_net();
@@ -514,17 +536,12 @@ static void nss_core_halt(struct nss_core *core)
  * unconfigured pool is unbounded the other way: the firmware accepted 82242
  * buffers, 329 MB of slab on a 411 MB box, within ten seconds of the core
  * booting. The Wi-Fi data plane's own share of it is declared separately,
- * through nss_wifi_pool_set(). The ceiling is that share plus the 8192 the
- * connections and the exception path take; the firmware fills whatever
- * ceiling it is given, and each buffer costs a 4 KB slab object.
+ * through nss_wifi_pool_set(). The ceiling is that share plus the 16384 the
+ * expanded connections and the exception path take; the firmware fills
+ * whatever ceiling it is given, and each buffer costs a 4 KB slab object.
  */
-static unsigned int nss_pool_size = 16384;
-module_param_named(pool_size, nss_pool_size, uint, 0644);
-MODULE_PARM_DESC(pool_size, "empty buffers the host will lend the firmware");
-
-static unsigned int nss_pool_low = 4352;
-module_param_named(pool_low, nss_pool_low, uint, 0644);
-MODULE_PARM_DESC(pool_low, "buffers below which the firmware asks for more");
+static unsigned int nss_pool_size;
+static unsigned int nss_pool_low;
 /* The firmware refuses a span narrower than the ring the pool is topped up
  * through, so the asked-for ceiling is not always the one that takes effect.
  * The table of lent buffers is sized from the same answer, and is allocated
@@ -532,6 +549,12 @@ MODULE_PARM_DESC(pool_low, "buffers below which the firmware asks for more");
  */
 unsigned int nss_pool_ceiling(void)
 {
+	bool wlan = nss_wifili_expected();
+
+	if (!nss_pool_size)
+		nss_pool_size = wlan ? 24576 : 16384;
+	if (!nss_pool_low)
+		nss_pool_low = wlan ? 4352 : 4096;
 	if (nss_pool_low < NSS_RING_ENTRIES)
 		nss_pool_low = NSS_RING_ENTRIES;
 	if (nss_pool_size < 2 * nss_pool_low)
@@ -687,7 +710,7 @@ struct nss_n2h_buf_pool {
 	u64 vaddr[NSS_N2H_PAGES_PER_MSG];
 };
 
-static unsigned int nss_pbuf_bytes = 3100000;
+static unsigned int nss_pbuf_bytes = 32 * SZ_1M;
 module_param_named(pbuf_bytes, nss_pbuf_bytes, uint, 0644);
 MODULE_PARM_DESC(pbuf_bytes, "memory lent for the firmware's packet descriptors");
 
@@ -871,12 +894,21 @@ static int nss_core_boot(struct nss_core *core)
 	 * signalled, and the next boot would take that for its own answer.
 	 */
 	reinit_completion(&core->booted);
+	scoped_guard(spinlock_bh, &core->state_lock)
+		core->booting = true;
 	nss_core_release(core);
 
 	if (!wait_for_completion_timeout(&core->booted,
 					 msecs_to_jiffies(NSS_BOOT_TIMEOUT_MS))) {
 		dev_err(core->dev, "core %u did not answer in %u ms\n",
 			core->id, NSS_BOOT_TIMEOUT_MS);
+		dev_err(core->dev,
+			"boot registers: reset=%#x misc=%#x bar=%#x addr=%#x fetch=%#x\n",
+			readl(core->nphys + NSS_CORE_RESET_CTRL),
+			readl(core->misc_reset),
+			readl(core->nphys + NSS_CORE_BAR),
+			readl(core->nphys + NSS_CORE_BOOT_ADDR),
+			readl(core->nphys + NSS_CORE_IFETCH_RANGE));
 		nss_log_dump(core, "boot timeout");
 		nss_core_halt(core);
 		return -ETIMEDOUT;
@@ -899,17 +931,25 @@ static int nss_core_boot(struct nss_core *core)
 		goto halt;
 	}
 
+	nss_pool_configure(core);
+	nss_accel_in_core(core);
+	nss_rps_enable(core);
+	nss_pbuf_pool_add(core, nss_pbuf_bytes);
+	nss_core_stats_off(core);
+	/* The firmware needs its packet pools before table negotiation. Keep
+	 * flow steering disabled until both families acknowledge the handover.
+	 * A failed or ambiguous handover halts before its DMA blocks are freed.
+	 */
+	ret = nss_flow_configure(core);
+	if (ret)
+		goto halt;
+
 	ret = qca_ppe_fw_carrier_set(core->conduit, nss_flow_is_ours);
 	if (ret) {
 		dev_err(core->dev, "flows not steered to the firmware: %d\n", ret);
 		goto halt;
 	}
 
-	nss_pool_configure(core);
-	nss_accel_in_core(core);
-	nss_rps_enable(core);
-	nss_pbuf_pool_add(core, nss_pbuf_bytes);
-	nss_core_stats_off(core);
 	nss_bridge_start(core);
 
 	return 0;
@@ -922,6 +962,33 @@ free:
 	nss_mem_free_all(core);
 clk:
 	clk_bulk_disable_unprepare(NSS_CLK_OWN, &core->clks[NSS_CLK_FABRIC]);
+
+	return ret;
+}
+
+/* A timed-out boot queues a shared DMA reset. Finish it before rebuilding
+ * the firmware rings for one bounded retry. Other failures keep their error.
+ */
+static int nss_core_boot_retry(struct nss_core *core)
+{
+	int ret;
+
+	scoped_guard(mutex, &core->lock)
+		ret = nss_core_boot(core);
+	if (ret != -ETIMEDOUT)
+		return ret;
+
+	dev_warn(core->dev,
+		 "core %u boot timed out; retrying after EDMA reset\n",
+		 core->id);
+	flush_work(&core->edma_reset);
+	nss_edma_settle(core);
+
+	if (!READ_ONCE(core->up) || READ_ONCE(core->loaded))
+		return 0;
+
+	scoped_guard(mutex, &core->lock)
+		ret = nss_core_boot(core);
 
 	return ret;
 }
@@ -945,7 +1012,13 @@ void nss_core_stop(struct nss_core *core)
  */
 void nss_core_fault(struct nss_core *core)
 {
-	core->running = false;
+	/* Stop DMA without releasing shared buffers still owned by WLAN. */
+	writel(1, core->nphys + NSS_CORE_RESET_CTRL);
+	readl(core->nphys + NSS_CORE_RESET_CTRL);
+	scoped_guard(spinlock_bh, &core->state_lock) {
+		core->booting = false;
+		core->running = false;
+	}
 	qca_edma_cpu_queues_to_host(core->conduit);
 	core->faulted = true;
 	schedule_work(&core->restart);
@@ -966,14 +1039,29 @@ void nss_core_block(struct nss_core *core)
 	nss_core_fault(core);
 }
 
-/* The WLAN driver has described its rings again. */
+/* The WLAN driver has described its rings again, before mac80211 takes
+ * RTNL to restore its interfaces. The caller must hold neither RTNL nor
+ * the WiFiLi mutex: restart may need both to reset shared DMA and start
+ * the newly described instance. Do not defer this wait to VDEV creation.
+ */
 void nss_core_resume(struct nss_core *core)
 {
 	if (!READ_ONCE(core->up))
 		return;
 
-	reinit_completion(&core->resumed);
+	/* A dead core keeps its buffers until every WLAN instance stops.
+	 * Newly described rings must not resume against that old image.
+	 * No mac80211 PHY restart may hold RTNL while waiting here.
+	 */
+	if (!READ_ONCE(core->running) && READ_ONCE(core->loaded) &&
+	    !wait_var_event_timeout(&core->loaded,
+				    !READ_ONCE(core->loaded), NSS_HALT_TIMEOUT)) {
+		dev_err(core->dev, "WLAN instances did not release the halted core\n");
+		return;
+	}
+
 	schedule_work(&core->restart);
+	flush_work(&core->restart);
 }
 
 static void nss_core_restart(struct work_struct *work)
@@ -1007,9 +1095,8 @@ static void nss_core_restart(struct work_struct *work)
 	}
 
 	nss_edma_settle(core);
-	scoped_guard(mutex, &core->lock)
-		if (READ_ONCE(core->up) && !core->loaded)
-			ret = nss_core_boot(core);
+	if (READ_ONCE(core->up) && !READ_ONCE(core->loaded))
+		ret = nss_core_boot_retry(core);
 	/* After a fault the radios' interfaces are registered with the dead
 	 * instance; after a WLAN reset they are about to register again.
 	 */
@@ -1017,9 +1104,12 @@ static void nss_core_restart(struct work_struct *work)
 		nss_wifili_reset(core, false);
 	else if (!ret)
 		nss_wifili_resume(core);
-	complete_all(&core->resumed);
 
-	nss_phys_arm_ports(core);
+	/* mac80211 may already hold RTNL while waiting for WLAN recovery.
+	 * Ring handover must finish before that wait ends; port arming can
+	 * follow it from its own worker, without holding up the WLAN driver.
+	 */
+	schedule_work(&core->arm);
 }
 
 static void nss_phys_work(struct work_struct *work)
@@ -1031,6 +1121,14 @@ static int nss_boot_set(void *data, u64 val)
 {
 	struct nss_core *core = data;
 	int ret = 0;
+
+	/* WLAN recovery automatically restores its rings and interfaces. A
+	 * user-requested permanent halt leaves that recovery with no NSS,
+	 * so it must instead tear down WLAN modules or reboot. Fault recovery
+	 * and driver removal use their own coordinated lifetime paths.
+	 */
+	if (!val && nss_wifili_expected())
+		return -EBUSY;
 
 	WRITE_ONCE(core->up, val);
 
@@ -1048,8 +1146,7 @@ static int nss_boot_set(void *data, u64 val)
 	}
 
 	nss_edma_settle(core);
-	scoped_guard(mutex, &core->lock)
-		ret = nss_core_boot(core);
+	ret = nss_core_boot_retry(core);
 	if (ret)
 		return ret;
 
@@ -1135,9 +1232,9 @@ static int nss_rx_show(struct seq_file *s, void *unused)
 		   core->link_desc_returned, core->tx_posted,
 		   atomic64_read(&core->tx_done));
 
-	/* How many buffers the firmware is holding. It takes one per
-	 * accelerated connection, so a create rule refused for want of a
-	 * buffer is read here rather than inferred.
+	/* Total host buffers lent to the firmware, including WLAN and
+	 * protocol/exception work. This is not a free-buffer count; the N2H
+	 * snapshots in flows distinguish allocation failures from occupancy.
 	 */
 	seq_printf(s, "buffers in firmware custody: %d  desync: %llu\n",
 		   atomic_read(&core->buffers_queued),
@@ -1432,12 +1529,11 @@ static int nss_probe(struct platform_device *pdev)
 							       &nss_ipq8074;
 	INIT_LIST_HEAD(&core->allocs);
 	init_completion(&core->booted);
-	init_completion(&core->resumed);
-	complete_all(&core->resumed);
 	INIT_WORK(&core->restart, nss_core_restart);
 	INIT_WORK(&core->arm, nss_phys_work);
 	INIT_WORK(&core->edma_reset, nss_edma_reset_work);
 
+	spin_lock_init(&core->state_lock);
 	ret = devm_mutex_init(dev, &core->lock);
 	if (ret)
 		return ret;
@@ -1575,7 +1671,6 @@ static void nss_remove(struct platform_device *pdev)
 		nss_core_halt(core);
 	nss_wifili_halted(core);
 	cancel_work_sync(&core->restart);
-	complete_all(&core->resumed);
 	flush_work(&core->arm);
 	flush_work(&core->edma_reset);
 	/* After the halt, which forgets the bound core's node pairs. */

@@ -17,10 +17,21 @@
 #include <linux/netdevice.h>
 #include <linux/skbuff.h>
 #include <linux/seq_file.h>
+#include <linux/spinlock.h>
 #include <linux/types.h>
 #include <linux/workqueue.h>
 
 #include "nss_fw.h"
+
+/* A NO WIFI kernel can omit the wireless pointer from struct net_device. */
+static inline bool nss_dev_is_wifi(const struct net_device *dev)
+{
+#if IS_ENABLED(CONFIG_CFG80211_HEADERS)
+	return dev->ieee80211_ptr;
+#else
+	return false;
+#endif
+}
 
 /* Ring geometry. The index page always describes 16 host-to-firmware and 15
  * firmware-to-host slots whatever the SoC populates, so the arrays are sized
@@ -72,6 +83,7 @@
 #define NSS_H2N_FLAG_BUFFER_REUSABLE	0x8000
 
 unsigned int nss_pool_ceiling(void);
+unsigned int nss_wifili_expected(void);
 
 /* The firmware chooses its own offset inside a receive buffer, so the buffer
  * it is given is the head of the allocation and it reports where the payload
@@ -260,12 +272,17 @@ struct nss_skb_cb {
 	dma_addr_t dma;
 	bool tx;	/* a frame handed down, not a buffer handed over */
 	bool bidir;	/* mapped both ways: the firmware may hand it back filled */
-	u32 slot;	/* where the lent-buffer table holds this one */
+	u64 cookie;	/* host slot and generation, never an skb address */
 };
 
 #define NSS_SKB_CB(skb) ((struct nss_skb_cb *)(skb)->cb)
 
 static_assert(sizeof(struct nss_skb_cb) <= sizeof_field(struct sk_buff, cb));
+
+struct nss_lent_buffer {
+	struct sk_buff *skb;
+	u64 cookie;
+};
 
 /* A host-to-firmware ring and the buffers in flight on it. */
 struct nss_h2n_ring {
@@ -377,6 +394,9 @@ struct nss_core {
 	unsigned long core_rate;
 	u32 id;
 	bool loaded;
+	/* Only the first SOS from a released image can finish its boot. */
+	spinlock_t state_lock;
+	bool booting;
 	bool running;
 	bool wifili_probed;
 	bool wifili_started;
@@ -390,8 +410,6 @@ struct nss_core {
 	u32 faults;
 	unsigned long fault_window;
 	struct work_struct restart;
-	/* Completed once no restart is pending; WLAN interfaces wait on it. */
-	struct completion resumed;
 	struct clk **aux_clks;
 	int num_aux_clks;
 	unsigned long phys_armed;
@@ -448,10 +466,11 @@ struct nss_core {
 	 * so by the time it holds a poolful the descriptors that handed the
 	 * first ones over have been written many times since.
 	 */
-	struct sk_buff **lent;
+	struct nss_lent_buffer *lent;
 	u32 *lent_free;
 	u32 lent_free_n;
 	u32 lent_size;
+	u32 lent_shift;
 	spinlock_t lent_lock;
 	struct completion booted;
 
@@ -504,6 +523,8 @@ void nss_wifili_bind(struct nss_core *core);
 bool nss_wifili_owns(const struct net_device *dev);
 bool nss_wifili_is_soc(u32 if_num);
 void nss_wifili_me_snoop(u32 if_num, struct sk_buff *skb);
+bool nss_wifili_special_recv(struct nss_core *core, struct napi_struct *napi,
+			     const struct n2h_descriptor *desc, struct sk_buff *skb);
 bool nss_wifili_rx_80211(u32 if_num, struct net_device *dev,
 			 struct sk_buff *skb, struct napi_struct *napi);
 void nss_wifili_me_print(struct seq_file *s);
@@ -562,6 +583,7 @@ void nss_bridge_start(struct nss_core *core);
 void nss_bridge_stop(void);
 void nss_bridge_print(struct seq_file *s);
 void nss_flow_flush(void);
+int nss_flow_configure(struct nss_core *core);
 void nss_flow_withdraw_dev(const struct net_device *dev);
 int nss_flow_dyn_alloc(struct nss_core *core, u32 type);
 void nss_flow_dyn_free(struct nss_core *core, u32 type, int if_num);

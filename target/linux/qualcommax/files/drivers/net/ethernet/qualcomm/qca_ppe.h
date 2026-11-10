@@ -567,6 +567,7 @@
 #define   PPE_ACL_MIRROR_EN		BIT(17)		/* word 0 */
 #define   PPE_ACL_DSCP_TC_CHANGE_EN	BIT(14)		/* word 2 */
 #define   PPE_ACL_DSCP_TC		GENMASK(22, 15)	/* word 2 */
+#define   PPE_ACL_DSCP_TC_MASK		GENMASK(25, 18)	/* word 4: CPPE */
 #define   PPE_ACL_PRI_CHANGE_EN		BIT(3)		/* word 3 */
 #define   PPE_ACL_PRI			GENMASK(7, 4)	/* word 3 */
 #define   PPE_ACL_INT_DP_CHANGE_EN	BIT(8)		/* word 3 */
@@ -1942,6 +1943,7 @@ int ppe_scheduler_ready(struct qca_ppe_priv *priv);
 void ppe_scheduler_unready(struct qca_ppe_priv *priv);
 void ppe_scheduler_exit(struct qca_ppe_priv *priv);
 void ppe_port_queues_enable(struct qca_ppe_priv *priv, int port, bool en);
+bool ppe_port_shaped(struct qca_ppe_priv *priv, int port);
 void ppe_pause_update(struct qca_ppe_priv *priv);
 u32 ppe_port_queue_drops(struct qca_ppe_priv *priv, int port);
 struct seq_file;

@@ -1,5 +1,5 @@
 From: JiaY-shi <shi05275@163.com>
-Date: Wed, 28 Oct 2026 13:34:14 +0800
+Date: Sun, 08 Nov 2026 10:27:29 +0800
 Subject: [PATCH] wifi: ath12k: protect MAC reconfiguration throughout recovery
 
 Firmware recovery removes the driver's peers and resets num_stations before
@@ -43,15 +43,15 @@ Signed-off-by: ViKing <viking.yfy@qq.com>
  
  	ret = ath12k_hal_srng_init(ab);
  	if (ret)
-@@ -1442,8 +1443,6 @@
+@@ -1441,8 +1442,6 @@
+ 	ret = ath12k_core_qmi_firmware_ready(ab);
  	if (ret)
  		goto err_hal_srng_deinit;
- 
--	clear_bit(ATH12K_FLAG_RECOVERY, &ab->dev_flags);
 -
+-	clear_bit(ATH12K_FLAG_RECOVERY, &ab->dev_flags);
+ 
  	return 0;
  
- err_hal_srng_deinit:
 @@ -1683,9 +1682,10 @@
  	if (ab->is_reset) {
  		if (!test_bit(ATH12K_FLAG_REGISTERED, &ab->dev_flags)) {
@@ -168,7 +168,7 @@ Signed-off-by: ViKing <viking.yfy@qq.com>
  	}
  
  err_dp_peer_del:
-@@ -10930,12 +10964,16 @@
+@@ -10930,11 +10964,15 @@
  	struct ath12k_dp_link_vif *dp_link_vif;
  	struct ath12k_base *ab = ar->ab;
  	unsigned long time_left;
@@ -178,14 +178,13 @@ Signed-off-by: ViKing <viking.yfy@qq.com>
  	lockdep_assert_wiphy(ath12k_ar_to_hw(ar)->wiphy);
  
  	reinit_completion(&ar->vdev_delete_done);
- 
++
 +	if (test_bit(ATH12K_FLAG_RECOVERY, &ab->dev_flags) &&
 +	    list_empty(&arvif->list))
 +		goto err_vdev_del;
-+
+ 
  	ret = ath12k_wmi_vdev_delete(ar, arvif->vdev_id);
  	if (ret) {
- 		ath12k_warn(ab, "failed to delete WMI vdev %d: %d\n",
 @@ -10964,7 +11002,8 @@
  
  err_vdev_del:
@@ -230,6 +229,8 @@ Signed-off-by: ViKing <viking.yfy@qq.com>
  
 -		ath12k_warn(ar->ab, "pdev %d successfully recovered\n",
 -			    ar->pdev->pdev_id);
+-
+-		if (ar->ab->hw_params->current_cc_support &&
 +		if (hw_restarted)
 +			ath12k_warn(ar->ab, "pdev %d successfully recovered\n",
 +				    ar->pdev->pdev_id);
@@ -237,13 +238,12 @@ Signed-off-by: ViKing <viking.yfy@qq.com>
 +			ath12k_dbg(ab, ATH12K_DBG_BOOT,
 +				   "complete recovery while pdev %d is stopped\n",
 +				   ar->pdev->pdev_id);
- 
--		if (ar->ab->hw_params->current_cc_support &&
++
 +		if (hw_restarted && ar->ab->hw_params->current_cc_support &&
  		    ar->alpha2[0] != 0 && ar->alpha2[1] != 0) {
  			struct wmi_set_current_country_arg arg = {};
  
-@@ -13618,13 +13670,17 @@
+@@ -13618,12 +13670,16 @@
  			 */
  			if (recovery_count == ab->num_radios) {
  				atomic_dec(&ab->reset_count);
@@ -255,13 +255,12 @@ Signed-off-by: ViKing <viking.yfy@qq.com>
  				ath12k_dbg(ab, ATH12K_DBG_BOOT, "reset success\n");
  			}
  		}
- 
++
 +		if (!hw_restarted)
 +			continue;
-+
+ 
  		list_for_each_entry(arvif, &ar->arvifs, list) {
  			ahvif = arvif->ahvif;
- 			ath12k_dbg(ab, ATH12K_DBG_BOOT,
 --- a/drivers/net/wireless/ath/ath12k/peer.c
 +++ b/drivers/net/wireless/ath/ath12k/peer.c
 @@ -150,7 +150,8 @@
@@ -274,20 +273,20 @@ Signed-off-by: ViKing <viking.yfy@qq.com>
  {
  	struct ath12k_peer_delete_wait wait;
  	int ret;
-@@ -161,6 +162,13 @@
+@@ -160,6 +161,13 @@
+ 	ath12k_dp_link_peer_unassign(ath12k_ab_to_dp(ar->ab),
  				     &(ath12k_ar_to_ah(ar)->dp_hw), vdev_id,
  				     addr, ar->hw_link_id);
- 
++
 +	if (skip_fw_delete) {
 +		ath12k_dbg(ar->ab, ATH12K_DBG_BOOT,
 +			   "skip peer delete command for vdev %u addr %pM during recovery\n",
 +			   vdev_id, addr);
 +		return -EHOSTDOWN;
 +	}
-+
+ 
  	/*
  	 * Register the stack waiter before sending so the resp_event for
- 	 * this peer cannot arrive while no waiter is queued.
 @@ -414,6 +422,15 @@
  					     arvif->vdev_id, arsta->addr,
  					     ar->hw_link_id);

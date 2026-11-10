@@ -1,6 +1,6 @@
 From: ViKing <viking.yfy@qq.com>
-Date: Tue, 27 Oct 2026 09:40:00 +0800
-Subject: [PATCH] wifi: ath12k: support QCN9274 HW1 startup RX and diagnostics
+Date: Sun, 08 Nov 2026 10:27:29 +0800
+Subject: [PATCH] wifi: ath12k: support QCN9274 HW1 startup and RX
 
 Consolidate consecutive changes within this functional responsibility.
 Retain the final implementation and its error handling directly.
@@ -8,36 +8,11 @@ Retain the final implementation and its error handling directly.
 Merged from:
   100-01-ath12k-prevent-ltssm-startup-crash.patch
   100-02-wifi-ath12k-restore-qcn9274-hw10-rx-support.patch
-  100-03-ath12k-qcn9274-mhi-diagnostics.patch
 
+
+diff --git a/drivers/net/wireless/ath/ath12k/pci.c b/drivers/net/wireless/ath/ath12k/pci.c
 Signed-off-by: ViKing <viking.yfy@qq.com>
 
---- a/drivers/net/wireless/ath/ath12k/mhi.c
-+++ b/drivers/net/wireless/ath/ath12k/mhi.c
-@@ -188,7 +188,7 @@
- {
- 	struct ath12k_base *ab = ab_pci->ab;
- 	struct mhi_controller *mhi_ctrl;
--	unsigned int board_id;
-+	unsigned int board_id = ATH12K_BOARD_ID_DEFAULT;
- 	int ret;
- 	bool dualmac = false;
- 
-@@ -242,6 +242,14 @@
- 		}
- 	}
- 
-+	if (ab->hw_rev == ATH12K_HW_QCN9274_HW10 ||
-+	    ab->hw_rev == ATH12K_HW_QCN9274_HW20)
-+		ath12k_info(ab,
-+			    "QCN9274 MHI selection: hw_rev=%u board_id=0x%x dualmac=%u source=%s size=%zu\n",
-+			    ab->hw_rev, board_id, dualmac,
-+			    mhi_ctrl->fw_image ? mhi_ctrl->fw_image : "firmware-N.bin",
-+			    mhi_ctrl->fw_sz);
-+
- 	ret = ath12k_mhi_get_msi(ab_pci);
- 	if (ret) {
- 		ath12k_err(ab, "failed to get msi for mhi\n");
 --- a/drivers/net/wireless/ath/ath12k/pci.c
 +++ b/drivers/net/wireless/ath/ath12k/pci.c
 @@ -249,6 +249,9 @@
@@ -60,6 +35,9 @@ Signed-off-by: ViKing <viking.yfy@qq.com>
 -		ath12k_hal_rx_desc_get_mpdu_start_offset_qcn9274();
 -	tlv_filter.rx_msdu_end_offset =
 -		ath12k_hal_rx_desc_get_msdu_end_offset_qcn9274();
+-
+-	tlv_filter.rx_mpdu_start_wmask = ath12k_hal_rx_mpdu_start_wmask_get_qcn9274();
+-	tlv_filter.rx_msdu_end_wmask = ath12k_hal_rx_msdu_end_wmask_get_qcn9274();
 +	if (ab->hw_rev == ATH12K_HW_QCN9274_HW10) {
 +		/* WBE.1.0 does not support the compact TLV word masks. */
 +		tlv_filter.rx_mpdu_start_offset =
@@ -71,9 +49,7 @@ Signed-off-by: ViKing <viking.yfy@qq.com>
 +			ath12k_hal_rx_desc_get_mpdu_start_offset_qcn9274();
 +		tlv_filter.rx_msdu_end_offset =
 +			ath12k_hal_rx_desc_get_msdu_end_offset_qcn9274();
- 
--	tlv_filter.rx_mpdu_start_wmask = ath12k_hal_rx_mpdu_start_wmask_get_qcn9274();
--	tlv_filter.rx_msdu_end_wmask = ath12k_hal_rx_msdu_end_wmask_get_qcn9274();
++
 +		tlv_filter.rx_mpdu_start_wmask = ath12k_hal_rx_mpdu_start_wmask_get_qcn9274();
 +		tlv_filter.rx_msdu_end_wmask = ath12k_hal_rx_msdu_end_wmask_get_qcn9274();
 +	}
@@ -98,10 +74,12 @@ Signed-off-by: ViKing <viking.yfy@qq.com>
  		.hw_regs = &qcn9274_v1_regs,
 --- a/drivers/net/wireless/ath/ath12k/wifi7/hal_qcn9274.c
 +++ b/drivers/net/wireless/ath/ath12k/wifi7/hal_qcn9274.c
-@@ -1098,6 +1098,378 @@
+@@ -1096,6 +1096,378 @@
+ 		.wbm_ring_num = 4,
+ 		.rbm_id = HAL_RX_BUF_RBM_SW4_BM,
  	},
- };
- 
++};
++
 +/* Full RX TLV accessors for the WBE.1.0 firmware used by hw1.0. */
 +static bool ath12k_hal_rx_desc_get_first_msdu_qcn9274_hw10(struct hal_rx_desc *desc)
 +{
@@ -472,11 +450,9 @@ Signed-off-by: ViKing <viking.yfy@qq.com>
 +	.reo_status_dec_tlv_hdr = ath12k_hal_reo_status_dec_tlv_hdr_qcn9274,
 +	.mon_rx_status_dec_tlv_hdr = ath12k_hal_decode_tlv64_hdr,
 +	.get_tlv_hdr_align = ath12k_hal_get_tlv64_hdr_align,
-+};
-+
+ };
+ 
  const struct hal_ops hal_qcn9274_ops = {
- 	.create_srng_config = ath12k_hal_srng_create_config_qcn9274,
- 	.rx_desc_set_msdu_len = ath12k_hal_rx_desc_set_msdu_len_qcn9274,
 --- a/drivers/net/wireless/ath/ath12k/wifi7/hal_qcn9274.h
 +++ b/drivers/net/wireless/ath/ath12k/wifi7/hal_qcn9274.h
 @@ -14,6 +14,7 @@
@@ -531,22 +507,3 @@ Signed-off-by: ViKing <viking.yfy@qq.com>
  		.supports_shadow_regs = false,
  
  		.num_tcl_banks = 48,
---- a/drivers/net/wireless/ath/ath12k/wifi7/pci.c
-+++ b/drivers/net/wireless/ath/ath12k/wifi7/pci.c
-@@ -9,6 +9,7 @@
- #include "../pci.h"
- #include "pci.h"
- #include "../core.h"
-+#include "../debug.h"
- #include "../hif.h"
- #include "../mhi.h"
- #include "hw.h"
-@@ -86,6 +87,8 @@
- 	soc_hw_version = ath12k_pci_read32(ab, TCSR_SOC_HW_VERSION);
- 	*major = u32_get_bits(soc_hw_version, TCSR_SOC_HW_VERSION_MAJOR_MASK);
- 	*minor = u32_get_bits(soc_hw_version, TCSR_SOC_HW_VERSION_MINOR_MASK);
-+	ath12k_info(ab, "QCN9274 TCSR hardware version: raw=0x%08x major=%u minor=%u\n",
-+		    soc_hw_version, *major, *minor);
- }
- 
- static int ath12k_wifi7_pci_probe(struct pci_dev *pdev,

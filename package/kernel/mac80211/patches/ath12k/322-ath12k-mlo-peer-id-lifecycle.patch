@@ -1,5 +1,5 @@
 From: JiaY-shi <shi05275@163.com>
-Date: Wed, 28 Oct 2026 13:34:14 +0800
+Date: Sun, 08 Nov 2026 10:27:29 +0800
 Subject: [PATCH] wifi: ath12k: honor firmware peer limits and own pending MLO peer IDs
 
 The valid ML peer ID range is platform dependent and is reported by
@@ -161,7 +161,7 @@ Signed-off-by: ViKing <viking.yfy@qq.com>
  static int ath12k_setup_peer_smps(struct ath12k *ar, struct ath12k_link_vif *arvif,
  				  const u8 *addr,
  				  const struct ieee80211_sta_ht_cap *ht_cap,
-@@ -3872,9 +3922,21 @@
+@@ -3872,8 +3922,20 @@
  static int ath12k_mac_peer_assoc(struct ath12k *ar,
  				 struct ath12k_wmi_peer_assoc_arg *peer_arg)
  {
@@ -169,7 +169,7 @@ Signed-off-by: ViKing <viking.yfy@qq.com>
 +	struct ath12k_dp *dp = ath12k_ab_to_dp(ar->ab);
  	struct ath12k_hw *ah = ath12k_ar_to_ah(ar);
  	int ret;
- 
++
 +	/* A completion is shared by the radio. Reset the target peer as well
 +	 * so an unrelated or stale confirmation cannot look like success.
 +	 */
@@ -179,22 +179,21 @@ Signed-off-by: ViKing <viking.yfy@qq.com>
 +	if (peer)
 +		peer->assoc_status = U32_MAX;
 +	spin_unlock_bh(&dp->dp_lock);
-+
+ 
  	reinit_completion(&ar->peer_assoc_done);
  	reinit_completion(&ah->peer_ml_id_done);
- 
-@@ -3891,6 +3953,11 @@
+@@ -3890,6 +3952,11 @@
+ 			    peer_arg->peer_mac, peer_arg->vdev_id);
  		return -ETIMEDOUT;
  	}
- 
++
 +	ret = ath12k_mac_peer_assoc_status(ar, peer_arg->vdev_id,
 +					   peer_arg->peer_mac);
 +	if (ret)
 +		return ret;
-+
+ 
  	/*
  	 * For devices where the firmware allocates the MLD peer ID, the host
- 	 * learns the real ID only from the MLO_RX_PEER_MAP HTT event, which is
 @@ -7169,7 +7236,7 @@
  	struct ieee80211_vif *vif = ath12k_ahvif_to_vif(arvif->ahvif);
  	struct ieee80211_sta *sta = ath12k_ahsta_to_sta(arsta->ahsta);
@@ -293,10 +292,12 @@ Signed-off-by: ViKing <viking.yfy@qq.com>
  		       bool skip_fw_delete)
  {
  	struct ath12k_peer_delete_wait wait;
-@@ -195,6 +195,22 @@
+@@ -193,6 +193,22 @@
+ static int ath12k_wait_for_peer_created(struct ath12k *ar, int vdev_id, const u8 *addr)
+ {
  	return ath12k_wait_for_dp_link_peer_common(ar->ab, vdev_id, addr, true);
- }
- 
++}
++
 +static int ath12k_peer_create_cleanup(struct ath12k *ar, u32 vdev_id,
 +				      const u8 *addr)
 +{
@@ -311,11 +312,9 @@ Signed-off-by: ViKing <viking.yfy@qq.com>
 +
 +	ath12k_peer_delete_wait_unregister(ar, &wait);
 +	return ret;
-+}
-+
+ }
+ 
  int ath12k_peer_create(struct ath12k *ar, struct ath12k_link_vif *arvif,
- 		       struct ieee80211_sta *sta,
- 		       struct ath12k_wmi_peer_create_arg *arg)
 @@ -207,7 +223,7 @@
  	struct ath12k_dp_link_peer *peer;
  	struct ath12k_sta *ahsta;
@@ -325,7 +324,7 @@ Signed-off-by: ViKing <viking.yfy@qq.com>
  	struct ath12k_dp *dp = ath12k_ab_to_dp(ar->ab);
  
  	lockdep_assert_wiphy(ath12k_ar_to_hw(ar)->wiphy);
-@@ -239,37 +255,43 @@
+@@ -239,36 +255,42 @@
  
  	ret = ath12k_wait_for_peer_created(ar, arg->vdev_id,
  					   arg->peer_addr);
@@ -373,15 +372,14 @@ Signed-off-by: ViKing <viking.yfy@qq.com>
 +			}
  			return ret;
  		}
- 
+-
 -		ret = ath12k_wait_for_peer_delete_done(ar, &wait);
 -		ath12k_peer_delete_wait_unregister(ar, &wait);
 -		if (ret)
 -			return ret;
--
+ 
  		return -ENOENT;
  	}
- 
 @@ -330,6 +352,18 @@
  						 (u8 *)arg->peer_addr, link_id,
  						 ar->hw_link_id);
@@ -426,14 +424,16 @@ Signed-off-by: ViKing <viking.yfy@qq.com>
  
  		set_bit(ml_peer_id, ah->free_ml_peer_id_map);
 -		break;
-+		ah->last_ml_peer_id = ml_peer_id;
-+		return ml_peer_id | ATH12K_PEER_ML_ID_VALID;
- 	}
- 
+-	}
+-
 -	if (ml_peer_id == ATH12K_MAX_MLO_PEERS)
 -		return ATH12K_MLO_PEER_ID_INVALID;
 -
 -	return ml_peer_id | ATH12K_PEER_ML_ID_VALID;
++		ah->last_ml_peer_id = ml_peer_id;
++		return ml_peer_id | ATH12K_PEER_ML_ID_VALID;
++	}
++
 +	return ATH12K_MLO_PEER_ID_INVALID;
  }
  
@@ -445,7 +445,7 @@ Signed-off-by: ViKing <viking.yfy@qq.com>
  	lockdep_assert_wiphy(ah->hw->wiphy);
  
  	/*
-@@ -366,13 +409,45 @@
+@@ -366,11 +409,43 @@
  	 * free_ml_peer_id_map.
  	 */
  	if (ah->host_alloc_ml_id &&
@@ -462,8 +462,8 @@ Signed-off-by: ViKing <viking.yfy@qq.com>
 +			clear_bit(id, ah->free_ml_peer_id_map);
 +	}
  	ahsta->ml_peer_id = ATH12K_MLO_PEER_ID_INVALID;
- }
- 
++}
++
 +void ath12k_peer_ml_quarantine(struct ath12k_hw *ah,
 +			       struct ath12k_sta *ahsta, int reason)
 +{
@@ -490,32 +490,32 @@ Signed-off-by: ViKing <viking.yfy@qq.com>
 +			       id, sta->addr, reason,
 +			       bitmap_weight(ah->quarantined_ml_peer_id_map,
 +					     ah->max_ml_peer_ids));
-+}
-+
+ }
+ 
  int ath12k_peer_mlo_link_peers_delete(struct ath12k_vif *ahvif, struct ath12k_sta *ahsta)
- {
- 	DECLARE_BITMAP(registered, IEEE80211_MLD_MAX_NUM_LINKS);
 @@ -408,12 +483,22 @@
  	for_each_set_bit(link_id, &links, IEEE80211_MLD_MAX_NUM_LINKS) {
  		arvif = wiphy_dereference(ah->hw->wiphy, ahvif->link[link_id]);
  		arsta = wiphy_dereference(ah->hw->wiphy, ahsta->link[link_id]);
 -		if (!arvif || !arsta)
+-			continue;
 +		if (!arvif || !arsta) {
 +			ath12k_hw_warn(ah,
 +				       "missing link state %u while deleting ML peer %pM\n",
 +				       link_id, sta->addr);
 +			err_ret = -ENOENT;
- 			continue;
++			continue;
 +		}
  
  		ar = arvif->ar;
 -		if (!ar)
+-			continue;
 +		if (!ar) {
 +			ath12k_hw_warn(ah,
 +				       "missing radio for link %u while deleting ML peer %pM\n",
 +				       link_id, sta->addr);
 +			err_ret = -ENODEV;
- 			continue;
++			continue;
 +		}
  
  		ath12k_dp_peer_cleanup(ar, arvif->vdev_id, arsta->addr);
@@ -623,10 +623,11 @@ Signed-off-by: ViKing <viking.yfy@qq.com>
  
  	if (ath12k_pull_peer_sta_kickout_ev(ab, skb, &arg) != 0) {
  		ath12k_warn(ab, "failed to extract peer sta kickout event");
-@@ -7591,6 +7630,18 @@
+@@ -7590,6 +7629,18 @@
+ 	}
  
  	rcu_read_lock();
- 
++
 +	spin_lock_bh(&dp->dp_lock);
 +	dp_peer = ath12k_dp_link_peer_find_by_addr(dp, arg.mac_addr);
 +	if (dp_peer) {
@@ -638,14 +639,14 @@ Signed-off-by: ViKing <viking.yfy@qq.com>
 +		dp_peer_valid = true;
 +	}
 +	spin_unlock_bh(&dp->dp_lock);
-+
+ 
  	spin_lock_bh(&ab->base_lock);
  
- 	arsta = ath12k_link_sta_find_by_addr(ab, arg.mac_addr);
-@@ -7612,6 +7663,42 @@
+@@ -7611,6 +7662,42 @@
+ 	ar = arvif->ar;
  	ahsta = arsta->ahsta;
  	sta = ath12k_ahsta_to_sta(ahsta);
- 
++
 +	if (sta->mlo) {
 +		if (arsta->link_id >= IEEE80211_MLD_MAX_NUM_LINKS ||
 +		    !(sta->valid_links & BIT(arsta->link_id)) ||
@@ -681,10 +682,9 @@ Signed-off-by: ViKing <viking.yfy@qq.com>
 +			    dp_mlo);
 +		goto exit;
 +	}
-+
+ 
  	ath12k_dbg(ab, ATH12K_DBG_WMI,
  		   "peer sta kickout event %pM reason: %d rssi: %d\n",
- 		   arg.mac_addr, arg.reason, arg.rssi);
 @@ -7948,6 +8035,8 @@
  static void ath12k_peer_assoc_conf_event(struct ath12k_base *ab, struct sk_buff *skb)
  {
@@ -706,10 +706,11 @@ Signed-off-by: ViKing <viking.yfy@qq.com>
  
  	rcu_read_lock();
  	ar = ath12k_mac_get_ar_by_vdev_id(ab, peer_assoc_conf.vdev_id);
-@@ -7969,6 +8059,14 @@
+@@ -7968,6 +8058,14 @@
+ 		rcu_read_unlock();
  		return;
  	}
- 
++
 +	spin_lock_bh(&dp->dp_lock);
 +	peer = ath12k_dp_link_peer_find_by_vdev_and_addr(dp,
 +							 peer_assoc_conf.vdev_id,
@@ -717,10 +718,9 @@ Signed-off-by: ViKing <viking.yfy@qq.com>
 +	if (peer)
 +		peer->assoc_status = peer_assoc_conf.status;
 +	spin_unlock_bh(&dp->dp_lock);
-+
+ 
  	complete(&ar->peer_assoc_done);
  	rcu_read_unlock();
- }
 @@ -9657,24 +9755,51 @@
  	rcu_read_unlock();
  }

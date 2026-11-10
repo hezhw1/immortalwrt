@@ -1,5 +1,5 @@
 From: JiaY-shi <shi05275@163.com>
-Date: Wed, 28 Oct 2026 13:34:14 +0800
+Date: Sun, 08 Nov 2026 10:27:29 +0800
 Subject: [PATCH] wifi: ath12k: recover AHB UserPD failures and independent reloads
 
 The IPQ5332 DT exposes a UserPD fatal interrupt but ath12k only requests
@@ -74,6 +74,7 @@ Signed-off-by: ViKing <viking.yfy@qq.com>
 -		ath12k_err(ab, "unable to map memory region: %pa+%pa\n",
 -			   &rmem->base, &rmem->size);
 -		return PTR_ERR(mem_region);
+-	}
 +	if (!ab_ahb->userpd_mem_region) {
 +		ab_ahb->userpd_mem_phys = rmem->base;
 +		ab_ahb->userpd_mem_size = rmem->size;
@@ -86,7 +87,7 @@ Signed-off-by: ViKing <viking.yfy@qq.com>
 +				   &rmem->base, &rmem->size, ret);
 +			return ret;
 +		}
- 	}
++	}
 +	mem_phys = ab_ahb->userpd_mem_phys;
 +	mem_size = ab_ahb->userpd_mem_size;
 +	mem_region = ab_ahb->userpd_mem_region;

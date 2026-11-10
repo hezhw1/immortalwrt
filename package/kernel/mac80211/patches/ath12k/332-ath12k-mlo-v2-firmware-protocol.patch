@@ -1,5 +1,5 @@
 From: JiaY-shi <shi05275@163.com>
-Date: Wed, 28 Oct 2026 13:34:14 +0800
+Date: Sun, 08 Nov 2026 10:27:29 +0800
 Subject: [PATCH] wifi: ath12k: implement MLO v2 topology association and peer maps
 
 Qualcomm's multi-chip firmware supports a version 2 MLO topology TLV that
@@ -47,19 +47,7 @@ Signed-off-by: ViKing <viking.yfy@qq.com>
  
 -	ath12k_dbg(ab, ATH12K_DBG_DP_HTT, "htt mlo peer map peer %pM id %u\n",
 -		   peer_addr, peer_id);
-+	hw_peer_id = le32_get_bits(ev->ast_info,
-+				   HTT_T2H_MLO_PEER_MAP_AST_IDX);
-+	ast_hash = le32_get_bits(ev->ast_info,
-+				 HTT_T2H_MLO_PEER_MAP_CACHE_SET_NUM);
-+
-+	ret = ath12k_dp_peer_mlo_map_event(ab, peer_addr, peer_id,
-+					  ast_hash, hw_peer_id);
-+	if (ret)
-+		ath12k_warn(ab,
-+			    "failed to map mlo peer %pM id %u ast %u/%u: %d\n",
-+			    peer_addr, peer_id, hw_peer_id, ast_hash, ret);
-+}
- 
+-
 -	/*
 -	 * Fix up the dp_peer entry created with ATH12K_MLO_PEER_ID_PENDING
 -	 * earlier; on chips with host_alloc_ml_id == false this is the only
@@ -75,6 +63,20 @@ Signed-off-by: ViKing <viking.yfy@qq.com>
 -			ath12k_warn(ab,
 -				    "failed to fix up peer id %u for dp peer %pM: %d\n",
 -				    peer_id, peer_addr, ret);
+-	}
++	hw_peer_id = le32_get_bits(ev->ast_info,
++				   HTT_T2H_MLO_PEER_MAP_AST_IDX);
++	ast_hash = le32_get_bits(ev->ast_info,
++				 HTT_T2H_MLO_PEER_MAP_CACHE_SET_NUM);
++
++	ret = ath12k_dp_peer_mlo_map_event(ab, peer_addr, peer_id,
++					  ast_hash, hw_peer_id);
++	if (ret)
++		ath12k_warn(ab,
++			    "failed to map mlo peer %pM id %u ast %u/%u: %d\n",
++			    peer_addr, peer_id, hw_peer_id, ast_hash, ret);
++}
++
 +static void ath12k_dp_htt_mlo_peer_unmap_handler(struct ath12k_base *ab,
 +						 struct sk_buff *skb)
 +{
@@ -85,7 +87,7 @@ Signed-off-by: ViKing <viking.yfy@qq.com>
 +		ath12k_warn(ab, "unexpected htt mlo peer unmap event len %u\n",
 +			    skb->len);
 +		return;
- 	}
++	}
 +
 +	peer_id = le32_get_bits(*info0,
 +				HTT_T2H_MLO_PEER_UNMAP_INFO0_MLO_PEER_ID);
@@ -95,16 +97,16 @@ Signed-off-by: ViKing <viking.yfy@qq.com>
  }
  
  void ath12k_dp_htt_htc_t2h_msg_handler(struct ath12k_base *ab,
-@@ -708,6 +720,9 @@
+@@ -707,6 +719,9 @@
+ 		break;
  	case HTT_T2H_MSG_TYPE_MLO_RX_PEER_MAP:
  		ath12k_dp_htt_mlo_peer_map_handler(ab, skb);
- 		break;
++		break;
 +	case HTT_T2H_MSG_TYPE_MLO_RX_PEER_UNMAP:
 +		ath12k_dp_htt_mlo_peer_unmap_handler(ab, skb);
-+		break;
+ 		break;
  	default:
  		ath12k_dbg(ab, ATH12K_DBG_DP_HTT, "dp_htt event %d not handled\n",
- 			   type);
 --- a/drivers/net/wireless/ath/ath12k/dp_htt.h
 +++ b/drivers/net/wireless/ath/ath12k/dp_htt.h
 @@ -931,6 +931,7 @@
@@ -143,11 +145,12 @@ Signed-off-by: ViKing <viking.yfy@qq.com>
  
 -int ath12k_dp_peer_fixup_peer_id(struct ath12k_base *ab,
 -				 const u8 *peer_addr, u16 peer_id)
+-{
+-	struct ath12k_dp_link_peer *link_peer;
 +int ath12k_dp_peer_mlo_map_event(struct ath12k_base *ab,
 +				 const u8 *peer_addr, u16 peer_id,
 +				 u16 ast_hash, u16 hw_peer_id)
- {
--	struct ath12k_dp_link_peer *link_peer;
++{
 +	struct ath12k_dp_link_peer *link_peer, *mlo_link_peer;
  	struct ath12k_dp_peer *dp_peer = NULL;
  	struct ath12k_hw_group *ag = ab->ag;
@@ -308,10 +311,12 @@ Signed-off-by: ViKing <viking.yfy@qq.com>
  static const struct qmi_elem_info qmi_wlanfw_host_cap_req_msg_v01_ei[] = {
  	{
  		.data_type	= QMI_OPT_FLAG,
-@@ -507,6 +544,25 @@
+@@ -505,6 +542,25 @@
+ 		.tlv_type	= 0x27,
+ 		.offset		= offsetof(struct qmi_wlanfw_host_cap_req_msg_v01,
  					   feature_list),
- 	},
- 	{
++	},
++	{
 +		.data_type	= QMI_OPT_FLAG,
 +		.elem_len	= 1,
 +		.elem_size	= sizeof(u8),
@@ -329,11 +334,9 @@ Signed-off-by: ViKing <viking.yfy@qq.com>
 +		.offset		= offsetof(struct qmi_wlanfw_host_cap_req_msg_v01,
 +					   mlo_chip_info_v2),
 +		.ei_array	= wlfw_host_mlo_chip_info_s_v02_ei,
-+	},
-+	{
+ 	},
+ 	{
  		.data_type	= QMI_EOTI,
- 		.array_type	= NO_ARRAY,
- 		.tlv_type	= QMI_COMMON_TLV_TYPE,
 @@ -2086,12 +2142,85 @@
  	ag->hw_link_id_init_done = true;
  }
@@ -421,22 +424,22 @@ Signed-off-by: ViKing <viking.yfy@qq.com>
  	u8 hw_link_id = 0;
  	int i, j, ret;
  
-@@ -2114,6 +2243,15 @@
- 		return -EINVAL;
- 	}
+@@ -2111,6 +2240,15 @@
  
+ 	if (ab->device_id == ATH12K_INVALID_DEVICE_ID) {
+ 		ath12k_err(ab, "failed to send MLO cap due to invalid device id\n");
++		return -EINVAL;
++	}
++
 +	use_v2 = ag->num_devices > 1;
 +	max_num_chips = use_v2 ? QMI_WLFW_MAX_NUM_MLO_CHIPS_V2_V01 :
 +				 QMI_WLFW_MAX_NUM_MLO_CHIPS_V01;
 +	if (ag->num_devices > max_num_chips) {
 +		ath12k_err(ab, "MLO group has too many devices: %d\n",
 +			   ag->num_devices);
-+		return -EINVAL;
-+	}
-+
- 	req->mlo_capable_valid = 1;
- 	req->mlo_capable = 1;
- 	req->mlo_chip_id_valid = 1;
+ 		return -EINVAL;
+ 	}
+ 
 @@ -2137,47 +2275,67 @@
  		ath12k_host_cap_hw_link_id_init(ag);
  
@@ -471,11 +474,12 @@ Signed-off-by: ViKing <viking.yfy@qq.com>
  
  		ath12k_dbg(ab, ATH12K_DBG_QMI, "mlo device id %d num_link %d\n",
 -			   info->chip_id, info->num_local_links);
-+			   chip_info->chip_id, chip_info->num_local_links);
- 
+-
 -		for (j = 0; j < info->num_local_links; j++) {
 -			info->hw_link_id[j] = partner_ab->wsi_info.hw_link_id_base + j;
 -			info->valid_mlo_link_id[j] = 1;
++			   chip_info->chip_id, chip_info->num_local_links);
++
 +		for (j = 0; j < chip_info->num_local_links; j++) {
 +			chip_info->hw_link_id[j] =
 +				partner_ab->wsi_info.hw_link_id_base + j;
@@ -532,7 +536,7 @@ Signed-off-by: ViKing <viking.yfy@qq.com>
  #define QMI_WLANFW_HOST_CAP_REQ_V01			0x0034
  #define QMI_WLANFW_HOST_CAP_RESP_MSG_V01_MAX_LEN	7
  #define QMI_WLFW_HOST_CAP_RESP_V01			0x0034
-@@ -194,7 +194,9 @@
+@@ -194,13 +194,21 @@
  };
  
  #define QMI_WLFW_MAX_NUM_MLO_CHIPS_V01 3
@@ -542,19 +546,18 @@ Signed-off-by: ViKing <viking.yfy@qq.com>
  
  struct wlfw_host_mlo_chip_info_s_v01 {
  	u8 chip_id;
-@@ -203,6 +205,12 @@
+ 	u8 num_local_links;
+ 	u8 hw_link_id[QMI_WLFW_MAX_NUM_MLO_LINKS_PER_CHIP_V01];
  	u8 valid_mlo_link_id[QMI_WLFW_MAX_NUM_MLO_LINKS_PER_CHIP_V01];
- };
- 
++};
++
 +struct wlfw_host_mlo_chip_info_s_v02 {
 +	struct wlfw_host_mlo_chip_info_s_v01 mlo_chip_info;
 +	u8 num_adj_chips;
 +	struct wlfw_host_mlo_chip_info_s_v01 mlo_adj_chip_info[QMI_WLFW_MAX_NUM_MLO_ADJ_CHIPS_V01];
-+};
-+
+ };
+ 
  enum ath12k_qmi_cnss_feature {
- 	CNSS_FEATURE_MIN_ENUM_VAL_V01 = INT_MIN,
- 	CNSS_QDSS_CFG_MISS_V01 = 3,
 @@ -260,6 +268,9 @@
  	u8 mlo_num_chips;
  	u8 mlo_chip_info_valid;

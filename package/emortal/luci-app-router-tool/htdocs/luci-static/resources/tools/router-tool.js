@@ -82,12 +82,6 @@ function lanContext() {
 	return Object.fromEntries([ 'proto', 'ipaddr', 'netmask' ].map(key => [ key, copy(uci.get('network', 'lan', key)) ]));
 }
 
-function savedLan(state) {
-	if (state?.lan && typeof state.lan == 'object') return state.lan;
-	const options = [ 'proto', 'ipaddr', 'netmask' ].map(key => trackedOption(state, 'network', 'lan', key));
-	return options.every(Boolean) ? Object.fromEntries(options.map(o => [ o.key, copy(o.expected) ])) : null;
-}
-
 function finishSnapshot(state) {
 	for (const option of state.options) {
 		const value = copy(uci.get(option.config, option.sid, option.key));
@@ -98,9 +92,8 @@ function finishSnapshot(state) {
 		const current = sectionValues(section.config, section.sid);
 		if (!current) continue;
 		if (state.mode != 'ap') {
-			for (const key of new Set(Object.keys(section.values || {}).concat(Object.keys(current)))) {
+			for (const key of Object.keys(current)) {
 				const option = { config: section.config, sid: section.sid, type: uci.get(section.config, section.sid)['.type'], key, expected: copy(current[key]) };
-				if (section.values && !optionEqual(option, section.values[key], current[key])) option.custom = true;
 				state.options.push(option);
 			}
 			continue;
@@ -120,8 +113,9 @@ function setOptions(config, sid, values) {
 	if (sid == null) return;
 	for (const [ key, value ] of Object.entries(values)) {
 		if (recorder) {
+			const custom = recorder.mode != 'ap' && customOption(previousSnapshot, config, sid, key);
 			const option = recordOption(recorder, config, sid, key);
-			if (recorder.mode != 'ap' && customOption(previousSnapshot, config, sid, key)) {
+			if (custom) {
 				if (option) option.custom = true;
 				continue;
 			}
@@ -176,7 +170,7 @@ function wan6Device() {
 
 function readSnapshot(sid, option, mode) {
 	try {
-		const state = JSON.parse(uci.get('network', sid, option) || 'null');
+		const state = JSON.parse(uci.get('router-tool', 'main', option) || 'null');
 		const validValue = v => v == null || typeof v == 'string' || Array.isArray(v) && v.every(x => typeof x == 'string');
 		const validSection = s => s && [ 'network', 'dhcp', 'firewall', 'wireless' ].includes(s.config) && typeof s.sid == 'string' && s.sid.length && typeof s.type == 'string' && s.type.length;
 		const seen = new Set();
@@ -187,6 +181,8 @@ function readSnapshot(sid, option, mode) {
 			(Object.hasOwn(state, 'lan') && (!state.lan || Array.isArray(state.lan) || typeof state.lan != 'object' ||
 				Object.keys(state.lan).some(key => ![ 'proto', 'ipaddr', 'netmask' ].includes(key)) || !Object.values(state.lan).every(validValue))) ||
 			!Array.isArray(state.options) || !Array.isArray(state.created) || !state.options.length && !state.created.length) return null;
+		if (Object.hasOwn(state, 'dhcpv4_defaults') || mode != 'ap' &&
+			(!state.lan || typeof state.lan != 'object' || !Object.hasOwn(state, 'proto') || typeof state.manual_lan != 'boolean' || state.created.length)) return null;
 		for (const s of state.created) {
 			const id = `${s.config}/${s.sid}`;
 			if (!validSection(s) || !s.values || Array.isArray(s.values) || typeof s.values != 'object' || !Object.values(s.values).every(validValue) || seen.has(id)) return null;
@@ -222,16 +218,19 @@ function checkSnapshot(state, live) {
 }
 
 function verifyLiveSnapshot(sid, selected, enabled, before) {
-	const configs = [ 'network', 'dhcp', 'firewall', 'wireless' ];
+	const configs = [ 'network', 'dhcp', 'firewall', 'router-tool' ];
+	// NO WIFI images have no wireless configuration. Only recheck it when
+	// the form loaded it; errors for existing configurations must still fail.
+	if (Object.hasOwn(before, 'wireless')) configs.push('wireless');
 	return Promise.all(configs.map(config => callLiveConfig(config))).then(values => {
 		const live = Object.fromEntries(configs.map((config, i) => [ config, values[i] ]));
-		if (!enabled && live.network[sid]?.router_tool_ap_state)
+		if (!enabled && live['router-tool']?.main?.ap_state)
 			refuse(_('Mode switch refused: an AP snapshot exists while AP mode is disabled. Restore AP mode and use LuCI to switch back.'));
-		for (const key of [ 'router_tool_auto', 'router_tool_ap', 'router_tool_state', 'router_tool_ap_state' ])
-			if (!equal(live.network[sid]?.[key], before.network?.[sid]?.[key]))
+		for (const key of [ 'auto_role', 'ap_mode', 'state', 'ap_state' ])
+			if (!equal(live['router-tool']?.main?.[key], before['router-tool']?.main?.[key]))
 				refuse(_('Mode switch refused: configuration changed while this page was open. Reload the page.'));
-		const state = readSnapshot(sid, enabled ? 'router_tool_ap_state' : 'router_tool_state', enabled ? 'ap' : uci.get('network', sid, 'router_tool_auto'));
-		if ((enabled || uci.get('network', sid, 'router_tool_auto') || uci.get('network', sid, 'router_tool_state')) && !state)
+		const state = readSnapshot(sid, enabled ? 'ap_state' : 'state', enabled ? 'ap' : uci.get('router-tool', 'main', 'auto_role'));
+		if ((enabled || uci.get('router-tool', 'main', 'auto_role') || uci.get('router-tool', 'main', 'state')) && !state)
 			checkSnapshot(state);
 		if (enabled && !selected) checkSnapshot(state);
 		// Compare this page's edits with its load-time values, not a preset
@@ -244,10 +243,11 @@ function verifyLiveSnapshot(sid, selected, enabled, before) {
 				if (!Object.keys(changes).length) delete uci.state.changes[config][name];
 			}
 			const removed = uci.state.deletes[config]?.[name];
-			if (Array.isArray(removed)) {
-				const next = removed.filter(option => option != key);
-				if (next.length) uci.state.deletes[config][name] = next;
-				else delete uci.state.deletes[config][name];
+			// LuCI records option deletions as object keys; true removes the
+			// whole section. Drop an option already removed by another editor.
+			if (removed && removed !== true) {
+				delete removed[key];
+				if (!Object.keys(removed).length) delete uci.state.deletes[config][name];
 			}
 		}
 		for (const config of configs) {
@@ -282,7 +282,7 @@ function verifyLiveSnapshot(sid, selected, enabled, before) {
 }
 
 function retainedOptions(map, sid, enabled) {
-	const state = readSnapshot(sid, enabled ? 'router_tool_ap_state' : 'router_tool_state', enabled ? 'ap' : uci.get('network', sid, 'router_tool_auto'));
+	const state = readSnapshot(sid, enabled ? 'ap_state' : 'state', enabled ? 'ap' : uci.get('router-tool', 'main', 'auto_role'));
 	const options = (state?.options || []).concat((state?.created || []).flatMap(s =>
 		Object.entries(s.values).map(([ key, expected ]) => ({ config: s.config, sid: s.sid, key, expected }))));
 	const retained = options.filter(o => {
@@ -384,7 +384,7 @@ function subnet(value, netmask) {
 	const octets = address.split('.');
 	if (octets.length != 4 || octets.some(n => !/^\d+$/.test(n) || Number(n) > 255)) return null;
 	if (cidr != null && !/^\d+$/.test(cidr)) return null;
-	let prefix = cidr != null ? Number(cidr) : 24;
+	let prefix = cidr != null ? Number(cidr) : 32;
 	if (cidr == null && netmask) {
 		const masks = String(netmask).split('.');
 		if (masks.length != 4 || masks.some(n => !/^\d+$/.test(n) || Number(n) > 255)) return null;
@@ -422,27 +422,18 @@ function avoidSubnetConflict(context) {
 }
 
 function synchronize(sid, context) {
-	if (uci.get('network', sid, 'router_tool_ap') == '1') return;
+	if (uci.get('router-tool', 'main', 'ap_mode') == '1') return;
 	const role = uci.get('network', 'wan', 'proto') == 'pppoe' ? 'main' : 'sub';
-	previousSnapshot = readSnapshot(sid, 'router_tool_state', uci.get('network', sid, 'router_tool_auto'));
-	const beforeLan = savedLan(previousSnapshot);
+	previousSnapshot = readSnapshot(sid, 'state', uci.get('router-tool', 'main', 'auto_role'));
+	const beforeLan = previousSnapshot?.lan;
 	if (beforeLan && !equal(beforeLan, lanContext())) previousSnapshot.manual_lan = true;
-	// Migrate the old watch-only DHCPv4 fields once. Actual user overrides
-	// after that baseline remain owned by the user during future switches.
-	const dhcpv4Defaults = previousSnapshot && uci.get('network', sid, 'router_tool_auto') == role && !previousSnapshot.dhcpv4_defaults;
-	if (dhcpv4Defaults) {
-		recorder = previousSnapshot;
-		try { setOptions('dhcp', 'lan', { ignore: context.presets.common.dhcp.lan.ignore, dhcpv4: context.presets.common.dhcp.lan.dhcpv4 }); }
-		finally { recorder = null; }
-		previousSnapshot.dhcpv4_defaults = true;
-	}
-	if (uci.get('network', sid, 'router_tool_auto') != role) {
+	if (uci.get('router-tool', 'main', 'auto_role') != role) {
 		console.info(`[router-tool] Preparing ${role} router presets`);
 		const manualLan = !!previousSnapshot?.manual_lan || !!beforeLan && !equal(beforeLan, lanContext());
 		// Carry missing managed sections forward as deletion markers. Without
 		// this, switching away and back would recreate an explicit deletion.
 		const deleted = (previousSnapshot?.options || []).filter(o => !uci.get(o.config, o.sid)).map(copy);
-		const state = { version: 1, mode: role, options: deleted, created: [], manual_lan: manualLan, dhcpv4_defaults: true,
+		const state = { version: 1, mode: role, options: deleted, created: [], manual_lan: manualLan,
 			subnet_done: role != 'sub' || manualLan, lan: lanContext() };
 		recorder = state;
 		try {
@@ -460,23 +451,22 @@ function synchronize(sid, context) {
 			}
 		}
 		finally { recorder = null; }
-		uci.set('network', sid, 'router_tool_auto', role);
-		uci.set('network', sid, 'router_tool_state', finishSnapshot(state));
+		uci.set('router-tool', 'main', 'auto_role', role);
+		uci.set('router-tool', 'main', 'state', finishSnapshot(state));
 	}
 	else {
 		const state = previousSnapshot;
 		const option = trackedOption(state, 'network', 'wan', 'proto');
 		const device = trackedOption(state, 'network', 'wan6', 'device');
-		if ((state?.proto ?? option?.expected) != uci.get('network', 'wan', 'proto') ||
+		if (state?.proto != uci.get('network', 'wan', 'proto') ||
 			device && !device.custom && device.expected != wan6Device() && !customOption(state, 'network', 'wan6', 'device')) {
 			recorder = state;
 			try { setOptions('network', 'wan6', { device: wan6Device() }); }
 			finally { recorder = null; }
 			if (option) option.expected = uci.get('network', 'wan', 'proto');
-			uci.set('network', sid, 'router_tool_state', finishSnapshot(state));
+			uci.set('router-tool', 'main', 'state', finishSnapshot(state));
 		}
 	}
-	if (dhcpv4Defaults) uci.set('network', sid, 'router_tool_state', finishSnapshot(previousSnapshot));
 }
 
 function enableAp(sid, context) {
@@ -509,13 +499,13 @@ function enableAp(sid, context) {
 		configureFirewall('relay_ap', context.presets.firewall);
 	}
 	finally { recorder = null; }
-	uci.set('network', sid, 'router_tool_ap_state', finishSnapshot(state));
-	uci.set('network', sid, 'router_tool_ap', '1');
+	uci.set('router-tool', 'main', 'ap_state', finishSnapshot(state));
+	uci.set('router-tool', 'main', 'ap_mode', '1');
 	console.info(`[router-tool] AP configuration staged; saved ${state.options.length} options and ${state.created.length} new sections; awaiting Save & Apply`);
 }
 
 function disableAp(sid) {
-	const state = readSnapshot(sid, 'router_tool_ap_state', 'ap');
+	const state = readSnapshot(sid, 'ap_state', 'ap');
 	checkSnapshot(state);
 	for (const option of state.options.slice().reverse())
 		if (uci.get(option.config, option.sid) != null && optionEqual(option, uci.get(option.config, option.sid, option.key), option.expected))
@@ -529,8 +519,8 @@ function disableAp(sid) {
 	if (wan && ![ null, 'none' ].includes(uci.get('network', 'wan', 'proto')) &&
 		(wan == lan || bridge && L.toArray(uci.get('network', bridge, 'ports')).includes(wan)))
 		refuse(_('Mode switch refused: the active WAN device is still part of the LAN bridge. Review device assignments.'));
-	uci.unset('network', sid, 'router_tool_ap_state');
-	uci.set('network', sid, 'router_tool_ap', '0');
+	uci.unset('router-tool', 'main', 'ap_state');
+	uci.set('router-tool', 'main', 'ap_mode', '0');
 	console.info(`[router-tool] Previous configuration restored from AP snapshot; ${state.options.length} options; awaiting Save & Apply`);
 }
 
@@ -538,7 +528,7 @@ return baseclass.extend({
 	attach(map) {
 		if (map._routerToolAttached) return;
 		map._routerToolAttached = true;
-		for (const config of [ 'network', 'dhcp', 'firewall', 'wireless' ]) map.chain(config);
+		for (const config of [ 'network', 'dhcp', 'firewall', 'wireless', 'router-tool' ]) map.chain(config);
 		const context = { board: null, upstream4: [], upstreamProtocol: null, presets: null };
 		const load = map.load.bind(map);
 		map.load = function() {
@@ -547,6 +537,8 @@ return baseclass.extend({
 				return {};
 			}),
 				fs.read('/usr/share/router-tool/auto.json'), callInterfaces().catch(() => []) ]).then(data => {
+				if (uci.get('router-tool', 'main')?.['.type'] != 'settings')
+					refuse(_('Mode switch refused: section type changed at') + ' router-tool.main');
 				context.board = data[1];
 				context.presets = JSON.parse(data[2]);
 				const upstream = data[3].find(n => n.interface == 'wan') || {};
@@ -562,7 +554,7 @@ return baseclass.extend({
 			let previous = null;
 			const sid = globals();
 			const option = map._routerToolOption;
-			const enabled = uci.get('network', sid, 'router_tool_ap') == '1';
+			const enabled = uci.get('router-tool', 'main', 'ap_mode') == '1';
 			const selected = option ? option.formvalue(sid) == '1' : enabled;
 			const retained = retainedOptions(map, sid, enabled);
 			// Preserve the page's base before form parsing. The save callback
@@ -583,7 +575,7 @@ return baseclass.extend({
 				// Leaving AP restores unchanged preset values and keeps manual
 				// edits. Only a changed WAN protocol needs a new routed preset.
 				const role = uci.get('network', 'wan', 'proto') == 'pppoe' ? 'main' : 'sub';
-				if (sid && !selected && (!enabled || role != uci.get('network', sid, 'router_tool_auto'))) synchronize(sid, context);
+				if (sid && !selected && (!enabled || role != uci.get('router-tool', 'main', 'auto_role'))) synchronize(sid, context);
 				return cb ? cb() : undefined;
 				});
 			}, silent).catch(e => {
@@ -611,7 +603,15 @@ return baseclass.extend({
 			_('Manual changes are preserved. Concurrent edits to the same settings or incompatible device assignments stop the switch.'));
 		o.default = '0';
 		o.rmempty = false;
+		o.uciconfig = 'router-tool';
+		o.ucisection = 'main';
+		o.ucioption = 'ap_mode';
+		o.load = function() {
+			return uci.get('router-tool', 'main', 'ap_mode');
+		};
+		// Apply the flag with its snapshot after parsing and conflict checks.
 		o.write = function() {};
+		o.remove = function() {};
 		section.map._routerToolOption = o;
 		return o;
 	}

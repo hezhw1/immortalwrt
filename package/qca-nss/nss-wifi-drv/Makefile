@@ -2,9 +2,9 @@ include $(TOPDIR)/rules.mk
 include $(INCLUDE_DIR)/kernel.mk
 
 PKG_NAME:=nss-wifi-drv
-PKG_VERSION:=20261029
-PKG_RELEASE:=3
-PKG_CONFIG_DEPENDS:=CONFIG_NSS_WIFI_DEBUG
+PKG_VERSION:=20261110
+PKG_RELEASE:=2
+PKG_CONFIG_DEPENDS:=CONFIG_ATH11K_NSS_WIFI CONFIG_NSS_WIFI_DEBUG
 PKG_LICENSE:=GPL-2.0-only
 
 include $(INCLUDE_DIR)/package.mk
@@ -13,7 +13,8 @@ define KernelPackage/nss-wifi-drv
   SECTION:=kernel
   CATEGORY:=Kernel modules
   SUBMENU:=Network Devices
-  TITLE:=NSS firmware host driver for the Wi-Fi data plane
+  TITLE:=NSS firmware host driver
+  ABI_VERSION:=2
   DEPENDS:=@(TARGET_qualcommax_ipq807x||TARGET_qualcommax_ipq60xx) \
 	+nss-firmware +kmod-nft-bridge
   FILES:=$(PKG_BUILD_DIR)/nss-wifi-drv.ko
@@ -34,10 +35,10 @@ define KernelPackage/nss-wifi-drv/conffiles
 endef
 
 define KernelPackage/nss-wifi-drv/description
-  Boots the NSS firmware and speaks its message protocol, so the Wi-Fi
-  data plane runs on the NSS cores instead of the host. Generic redirect
-  nodes also carry raw-IP and USB Ethernet devices through their host
-  drivers. The wired switch ports belong to qca_edma and qca_ppe.
+  Boots the NSS firmware for Wi-Fi and generic redirect offload. Raw-IP
+  and USB Ethernet devices use their host drivers with NSS forwarding,
+  including on devices without ath11k. The wired switch ports belong to
+  qca_edma and qca_ppe.
 
   The module does not autoload: the nss-wifi service loads it and boots a
   core when nss-wifi.general.offload is 1, the default. The wired ports
@@ -63,10 +64,13 @@ define Build/InstallDev
 endef
 
 define KernelPackage/nss-wifi-drv/install
+	$(INSTALL_DIR) $(1)/etc/hotplug.d/ieee80211
+	$(INSTALL_DATA) ./files/nss-wifi.recovery $(1)/etc/hotplug.d/ieee80211/95-nss-wifi-recovery
 	$(INSTALL_DIR) $(1)/etc/config $(1)/etc/init.d
 	$(INSTALL_CONF) ./files/nss-wifi.config $(1)/etc/config/nss-wifi
 	$(INSTALL_BIN) ./files/nss-wifi.init $(1)/etc/init.d/nss-wifi
 	$(INSTALL_DIR) $(1)/etc/uci-defaults $(1)/usr/share/nss-wifi
+	echo $(if $(CONFIG_ATH11K_NSS_WIFI),1,0) > $(1)/usr/share/nss-wifi/wlan
 	$(INSTALL_BIN) ./files/nss-wifi.uci-defaults $(1)/etc/uci-defaults/90-nss-wifi-flowtable
 	$(INSTALL_BIN) ./files/nss-wifi.flowtable $(1)/usr/share/nss-wifi/flowtable.sh
 endef

@@ -1,5 +1,5 @@
 From: ViKing <viking.yfy@qq.com>
-Date: Tue, 27 Oct 2026 09:40:00 +0800
+Date: Sun, 08 Nov 2026 10:27:29 +0800
 Subject: [PATCH] wifi: ath12k: control HTT statistics and validate vendor layouts
 
 Consolidate consecutive changes within this functional responsibility.
@@ -8,12 +8,11 @@ Retain the final implementation and its error handling directly.
 Merged from:
   343-ath12k-allow-clearing-htt-statistics-selection.patch
   344-ath12k-guard-vendor-pdev-statistics-layout.patch
-
 Signed-off-by: ViKing <viking.yfy@qq.com>
 
 --- a/drivers/net/wireless/ath/ath12k/core.h
 +++ b/drivers/net/wireless/ath/ath12k/core.h
-@@ -1225,6 +1225,8 @@
+@@ -1224,6 +1224,8 @@
  
  struct ath12k_fw_stats_pdev {
  	struct list_head list;
@@ -83,6 +82,11 @@ Signed-off-by: ViKing <viking.yfy@qq.com>
  		list_add_tail(&dst->list, &stats->bcn);
  	}
 -	for (i = 0; i < le32_to_cpu(ev->num_pdev_stats); i++) {
+-		const struct ath12k_wmi_pdev_stats_params *src;
+-		struct ath12k_fw_stats_pdev *dst;
+-
+-		src = data;
+-		if (len < sizeof(*src)) {
 +	num_pdev = le32_to_cpu(ev->num_pdev_stats);
 +	pdev_len = sizeof(struct ath12k_wmi_pdev_stats_params);
 +	/* A pure PDEV array has no unparsed sections after it. Its record
@@ -99,21 +103,20 @@ Signed-off-by: ViKing <viking.yfy@qq.com>
 +	    !le32_to_cpu(ev->num_peer_extd2_stats)) {
 +		if (len % num_pdev ||
 +		    len / num_pdev < sizeof(struct ath12k_wmi_pdev_base_stats_params)) {
-+			ret = -EPROTO;
-+			goto exit;
-+		}
-+		pdev_len = len / num_pdev;
-+	}
-+	for (i = 0; i < num_pdev; i++) {
- 		const struct ath12k_wmi_pdev_stats_params *src;
- 		struct ath12k_fw_stats_pdev *dst;
- 
- 		src = data;
--		if (len < sizeof(*src)) {
-+		if (len < pdev_len) {
  			ret = -EPROTO;
  			goto exit;
  		}
++		pdev_len = len / num_pdev;
++	}
++	for (i = 0; i < num_pdev; i++) {
++		const struct ath12k_wmi_pdev_stats_params *src;
++		struct ath12k_fw_stats_pdev *dst;
++
++		src = data;
++		if (len < pdev_len) {
++			ret = -EPROTO;
++			goto exit;
++		}
  
  		stats->stats_id = WMI_REQUEST_PDEV_STAT;
  

@@ -16,9 +16,9 @@
 	};
 
 	reserved-memory {
-		tzapp: tzapp@4d600000 {
+		tzapp: tzapp@49b00000 {
 			no-map;
-			reg = <0x0 0x4d600000 0x0 0x00600000>;
+			reg = <0x0 0x49b00000 0x0 0x00600000>;
 		};
 	};
 };
@@ -37,6 +37,13 @@
 		ipq9574_s1: s1 {
 			regulator-min-microvolt = <725000>;
 			regulator-max-microvolt = <1075000>;
+			regulator-always-on;
+		};
+
+		ipq9574_s2: s2 {
+			regulator-min-microvolt = <700000>;
+			regulator-max-microvolt = <1000000>;
+			regulator-always-on;
 		};
 	};
 };

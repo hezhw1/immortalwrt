@@ -1,5 +1,5 @@
-From: ViKing <viking.yfy@qq.com>
-Date: Wed, 28 Oct 2026 13:34:14 +0800
+From: Stanislaw Pal <kuncy7@gmail.com>
+Date: Fri, 06 Nov 2026 02:35:21 +0800
 Subject: [PATCH] net: dsa: retain VLAN upper filtering and QCA 8021Q transport
 
 VLAN taggers need upper membership even while a port is in a VLAN-unaware
@@ -28,6 +28,7 @@ Signed-off-by: Julius Bairaktaris <julius@bairaktaris.de>
 Signed-off-by: Stanislaw Pal <kuncy7@gmail.com>
 Signed-off-by: ViKing <viking.yfy@qq.com>
 
+---
 --- a/drivers/net/dsa/qca/qca8k-8xxx.c
 +++ b/drivers/net/dsa/qca/qca8k-8xxx.c
 @@ -1811,6 +1811,9 @@
@@ -218,7 +219,7 @@ Signed-off-by: ViKing <viking.yfy@qq.com>
  		dev_err(priv->dev, "Failed to delete VLAN from port %d (%d)", port, ret);
 --- a/include/net/dsa.h
 +++ b/include/net/dsa.h
-@@ -411,6 +411,9 @@
+@@ -417,6 +417,9 @@
  	/* Keep VLAN filtering enabled on ports not offloading any upper */
  	u32			needs_standalone_vlan_filtering:1;
  
@@ -323,24 +324,24 @@ Signed-off-by: ViKing <viking.yfy@qq.com>
  
 --- a/net/dsa/user.c
 +++ b/net/dsa/user.c
-@@ -614,6 +614,16 @@
- 		ret = dsa_port_vlan_filtering(dp, attr->u.vlan_filtering,
- 					      extack);
- 		break;
-+	case SWITCHDEV_ATTR_ID_BRIDGE_VLAN_PROTOCOL:
-+		if (!dp->ds->vlan_upper_filtering_always ||
-+		    !dsa_port_offloads_bridge_dev(dp, attr->orig_dev))
-+			return -EOPNOTSUPP;
-+		if (attr->u.vlan_protocol != ETH_P_8021Q) {
-+			NL_SET_ERR_MSG_MOD(extack, "VLAN tagger requires an 802.1Q bridge");
-+			return -EINVAL;
-+		}
-+		ret = 0;
-+		break;
- 	case SWITCHDEV_ATTR_ID_BRIDGE_AGEING_TIME:
+@@ -618,7 +618,15 @@
  		if (!dsa_port_offloads_bridge_dev(dp, attr->orig_dev))
  			return -EOPNOTSUPP;
-@@ -1850,6 +1860,9 @@
+ 
+-		ret = dsa_port_vlan_protocol(dp, attr->u.vlan_protocol, extack);
++		if (dp->ds->vlan_upper_filtering_always) {
++			if (attr->u.vlan_protocol != ETH_P_8021Q) {
++				NL_SET_ERR_MSG_MOD(extack, "VLAN tagger requires an 802.1Q bridge");
++				return -EINVAL;
++			}
++			ret = 0;
++		} else {
++			ret = dsa_port_vlan_protocol(dp, attr->u.vlan_protocol, extack);
++		}
+ 		break;
+ 	case SWITCHDEV_ATTR_ID_BRIDGE_MC_DISABLED:
+ 		if ((!dsa_port_offloads_bridge_dev(dp, attr->orig_dev) &&
+@@ -1865,6 +1873,9 @@
  		if (extack._msg)
  			netdev_err(dev, "CPU port %d: %s\n", dp->cpu_dp->index,
  				   extack._msg);
@@ -350,7 +351,7 @@ Signed-off-by: ViKing <viking.yfy@qq.com>
  		return ret;
  	}
  
-@@ -2001,8 +2014,16 @@
+@@ -2016,8 +2027,16 @@
  int dsa_user_manage_vlan_filtering(struct net_device *user,
  				   bool vlan_filtering)
  {
@@ -367,7 +368,7 @@ Signed-off-by: ViKing <viking.yfy@qq.com>
  	if (vlan_filtering) {
  		user->features |= NETIF_F_HW_VLAN_CTAG_FILTER;
  
-@@ -2869,7 +2890,8 @@
+@@ -2884,7 +2903,8 @@
  	    cpu_dp->tag_ops->needed_tailroom)
  		user->features &= ~(NETIF_F_HW_VLAN_CTAG_TX |
  				    NETIF_F_HW_VLAN_STAG_TX);

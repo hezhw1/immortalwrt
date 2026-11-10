@@ -1259,7 +1259,8 @@ static int ppe_flow_alloc_ingress(struct qca_ppe_priv *priv, int iport,
 	ret = dsa_service ? -ENOENT : ppe_uplink_find(priv, iport, vid);
 	if (ret >= 0) {
 		priv->uplink[ret].ref++;
-	} else if (vid && ppe_flow_ingress_vsi(priv, iport, vid) < 0) {
+	} else if (!dsa_service && vid &&
+		   ppe_flow_ingress_vsi(priv, iport, vid) < 0) {
 		ret = ppe_flow_vlan_uplink_get(priv, iport, vid);
 		if (ret < 0)
 			return ret;
@@ -1817,9 +1818,18 @@ MODULE_PARM_DESC(cpu_xmit,
  * driver only queues them on the device. The device has to take Ethernet
  * frames as the nexthop builds them, with no tag or session to push.
  */
+static bool ppe_dev_is_wifi(const struct net_device *dev)
+{
+#if IS_ENABLED(CONFIG_CFG80211_HEADERS)
+	return dev->ieee80211_ptr;
+#else
+	return false;
+#endif
+}
+
 static bool ppe_cpu_xmit_ok(const struct ppe_flow_data *data)
 {
-	return ppe_cpu_xmit && !data->odev->ieee80211_ptr &&
+	return ppe_cpu_xmit && !ppe_dev_is_wifi(data->odev) &&
 	       net_eq(dev_net(data->odev), &init_net) &&
 	       netif_running(data->odev) &&
 	       data->odev->type == ARPHRD_ETHER &&
@@ -3137,8 +3147,10 @@ static bool ppe_flow_bridge_endpoint(struct qca_ppe_priv *priv,
 {
 	struct dsa_port *dp;
 
+	#if IS_ENABLED(CONFIG_CFG80211_HEADERS)
 	if (dev->ieee80211_ptr)
 		return dev->ieee80211_ptr->iftype == NL80211_IFTYPE_AP;
+#endif
 	dp = dsa_port_from_netdev(dev);
 	return !IS_ERR(dp) && dp->ds == &priv->ds;
 }
@@ -3155,7 +3167,7 @@ static int ppe_flow_bridge_path(struct qca_ppe_priv *priv,
 	if (!idev || idev == odev ||
 	    !ppe_flow_bridge_endpoint(priv, idev) ||
 	    !ppe_flow_bridge_endpoint(priv, odev) ||
-	    (idev->ieee80211_ptr && odev->ieee80211_ptr))
+	    (ppe_dev_is_wifi(idev) && ppe_dev_is_wifi(odev)))
 		return 0;
 	master = netdev_master_upper_dev_get_rcu(idev);
 	if (master && netif_is_bridge_master(master) &&
@@ -3253,8 +3265,16 @@ static int ppe_flow_offload_replace(struct ppe_flow_block *fb,
 		bridge_rtnl = true;
 	}
 
-	guard(mutex)(&priv->flow_lock);
-	guard(mutex)(&priv->vlan_lock);
+	/* Flowtable add work is retried while packets use software forwarding.
+	 * Do not let offers beyond hardware capacity queue sleeping workers
+	 * behind serialized table operations or a concurrent VLAN update.
+	 */
+	ACQUIRE(mutex_try, flow_guard)(&priv->flow_lock);
+	if (ACQUIRE_ERR(mutex_try, &flow_guard))
+		return -EAGAIN;
+	ACQUIRE(mutex_try, vlan_guard)(&priv->vlan_lock);
+	if (ACQUIRE_ERR(mutex_try, &vlan_guard))
+		return -EAGAIN;
 	priv->flow_request_cookie = f->cookie;
 	priv->flow_request_generation++;
 
@@ -4014,6 +4034,7 @@ static void ppe_sparse_work(struct work_struct *work)
 						 sparse_work.work);
 	struct ppe_flow_entry *entry, *tmp;
 	u32 pkts, delta;
+	bool shaped;
 
 	mutex_lock(&priv->flow_lock);
 	mutex_lock(&priv->vlan_lock);
@@ -4076,11 +4097,16 @@ static void ppe_sparse_work(struct work_struct *work)
 			ppe_flow_account(priv, entry, acct, bytes);
 		}
 
-		/* CPU egress has three bands, without a fourth sparse list. */
-		if (entry->oport == QCA_PPE_CPU_PORT)
-			continue;
+		/* The list is a queue of a shaped user port, so only a flow
+		 * that leaves by one has a use for it. Anywhere else the profile
+		 * buys nothing and costs the flow the DSCP its ACL rule writes,
+		 * which the switch stops applying once the flow's profile
+		 * outranks the ACL.
+		 */
+		shaped = entry->oport != QCA_PPE_CPU_PORT &&
+			 ppe_port_shaped(priv, entry->oport);
 
-		if (delta > PPE_SPARSE_PKTS || !ppe_sparse_flows) {
+		if (delta > PPE_SPARSE_PKTS || !ppe_sparse_flows || !shaped) {
 			entry->quiet = 0;
 			if (entry->sparse &&
 			    !ppe_flow_profile_set(priv, entry, entry->profile)) {
