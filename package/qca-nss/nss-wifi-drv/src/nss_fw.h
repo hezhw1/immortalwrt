@@ -77,6 +77,14 @@ struct nss_n2h_buffer_stats {
 
 /* Dynamic interfaces. */
 
+#define NSS_DYNAMIC_IF_START		28
+#define NSS_DYNAMIC_IF_END		156
+
+static inline bool nss_dynamic_interface_valid(s32 if_num)
+{
+	return if_num >= NSS_DYNAMIC_IF_START && if_num < NSS_DYNAMIC_IF_END;
+}
+
 #define NSS_DYNAMIC_INTERFACE_ALLOC_NODE	0
 #define NSS_DYNAMIC_INTERFACE_DEALLOC_NODE	1
 #define NSS_DYNAMIC_INTERFACE_MAX		2
@@ -1097,6 +1105,9 @@ struct nss_wifi_vdev_msg {
 #define NSS_WIFI_MESH_MSG_PATH_EXPIRY		10010
 #define NSS_WIFI_MESH_MSG_PROXY_PATH_TABLE_DUMP	10012
 #define NSS_WIFI_MESH_MSG_STATS_SYNC		10013
+
+#define NSS_WIFI_MESH_ERROR_PATH_NOT_FOUND	10011
+#define NSS_WIFI_MESH_ERROR_PROXY_PATH_NOT_FOUND	10014
 
 #define NSS_WIFI_MESH_PATH_UPDATE_FLAG_NEXTHOP			0x01
 #define NSS_WIFI_MESH_PATH_UPDATE_FLAG_HOPCOUNT			0x02
