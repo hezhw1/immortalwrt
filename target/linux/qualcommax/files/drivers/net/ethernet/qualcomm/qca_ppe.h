@@ -1301,6 +1301,7 @@
 #define PPE_FDB_OP_ENTRY_IDX		GENMASK(21, 11)
 
 #define PPE_FDB_RSLT_CMD_ID		GENMASK(3, 0)
+#define PPE_FDB_RSLT_FAILED		BIT(4)
 
 #define PPE_FDB_DATA1_VALID		BIT(16)
 #define PPE_FDB_DATA1_LKP_VALID		BIT(17)
@@ -1703,6 +1704,10 @@ struct qca_ppe_priv {
 	 * full and left the frame in its qdisc.
 	 */
 	struct net_device *shaper_dev[2];
+	/* What marks a frame ppe_flow_xmit() built for a switch port to the
+	 * shaper device it passes, by port: a dst only this driver holds.
+	 */
+	struct metadata_dst *shaper_md[PPE_NUM_PORTS];
 	atomic_t shaper_busy;
 	bool ct_dscp;
 	/* The software shapers offloaded flows are handed to: the ifb carrying
@@ -2009,6 +2014,8 @@ int ppe_routed_xlt_idx_alloc(struct qca_ppe_priv *priv);
 void ppe_xlt_idx_free(struct qca_ppe_priv *priv, int *idx);
 struct qca_ppe_vlan_entry *ppe_vlan_find(struct qca_ppe_priv *priv,
 					 struct net_device *br_dev, u16 vid);
+int ppe_fdb_replay_vlan(struct qca_ppe_priv *priv, struct dsa_port *cpu_dp,
+			const struct qca_ppe_vlan_entry *vlan);
 
 int qca_ppe_vlan_setup(struct dsa_switch *ds);
 int ppe_dsa_core_port_set_base(struct qca_ppe_priv *priv, int port, bool core);
@@ -2070,11 +2077,11 @@ int ppe_flow_uplink_set(struct qca_ppe_priv *priv, const char *name);
 int ppe_flow_shaper_set(struct qca_ppe_priv *priv, bool upload,
 			const char *name);
 
-#define PPE_XDEV_IFINDEX	GENMASK(27, 0)
+#define PPE_XDEV_IFINDEX	GENMASK_ULL(31, 0)
 /* The PPE built the frame's link headers, PPPoE and VLAN included. */
-#define PPE_XDEV_PUSH		BIT(28)
-#define PPE_XDEV_DL		BIT(29)
-#define PPE_XDEV_UL		BIT(30)
+#define PPE_XDEV_PUSH		BIT_ULL(32)
+#define PPE_XDEV_DL		BIT_ULL(33)
+#define PPE_XDEV_UL		BIT_ULL(34)
 void ppe_flow_purge_vsi(struct qca_ppe_priv *priv, u32 vsi);
 void ppe_flow_fw_purge(struct qca_ppe_priv *priv);
 void ppe_flow_purge_bridge_port(struct qca_ppe_priv *priv, int port);

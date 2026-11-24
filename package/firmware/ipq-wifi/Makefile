@@ -2,13 +2,13 @@ include $(TOPDIR)/rules.mk
 include $(INCLUDE_DIR)/version.mk
 
 PKG_NAME:=ipq-wifi
-PKG_RELEASE:=8
+PKG_RELEASE:=1
 
 PKG_SOURCE_PROTO:=git
 PKG_SOURCE_URL=$(PROJECT_GIT)/project/firmware/qca-wireless.git
-PKG_SOURCE_DATE:=2026-11-12
-PKG_SOURCE_VERSION:=e1c4cbaf43917e19779dbf9f8e276e31116bcaef
-PKG_MIRROR_HASH:=2d525d7af66de1dc947aff2653669265ccad678424e7fdfe71aebc6c55692437
+PKG_SOURCE_DATE:=2026-11-19
+PKG_SOURCE_VERSION:=6d7ddb81dfd1f641f96c94aef62a050ee4e46bf5
+PKG_MIRROR_HASH:=12b2ebae1515d07da1054f73a4b050dca168902e29d3135196c19551437b93b3
 PKG_FLAGS:=nonshared
 
 include $(INCLUDE_DIR)/package.mk
@@ -88,6 +88,7 @@ ALLWIFIBOARDS:= \
 	netgear_rbk40 \
 	netgear_rbk750 \
 	netgear_rbk850 \
+	netgear_rbk860 \
 	netgear_sxk80 \
 	netgear_wax214 \
 	netgear_wax218 \
@@ -122,6 +123,7 @@ ALLWIFIBOARDS:= \
 	tplink_re700x \
 	tplink_tl-wa1201-v2 \
 	ubnt_u7-pro-xgs \
+	ubnt_unifi-6-pro \
 	ubnt_utr \
 	wallys_dr40x9 \
 	wallys_dr5018s \
@@ -339,6 +341,7 @@ $(eval $(call generate-ipq-wifi-package,netgear_rbk350,Netgear RBK350))
 $(eval $(call generate-ipq-wifi-package,netgear_rbk40,Netgear RBK40))
 $(eval $(call generate-ipq-wifi-package,netgear_rbk750,Netgear RBK750))
 $(eval $(call generate-ipq-wifi-package,netgear_rbk850,Netgear RBK850))
+$(eval $(call generate-ipq-wifi-package,netgear_rbk860,Netgear RBK860))
 $(eval $(call generate-ipq-wifi-package,netgear_sxk80,Netgear SXK80))
 $(eval $(call generate-ipq-wifi-package,netgear_wax214,Netgear WAX214))
 $(eval $(call generate-ipq-wifi-package,netgear_wax218,Netgear WAX218))
@@ -373,6 +376,7 @@ $(eval $(call generate-ipq-wifi-package,tplink_eap660-hd-v1,TP-Link EAP660 HD v1
 $(eval $(call generate-ipq-wifi-package,tplink_re700x,TP-Link RE700X))
 $(eval $(call generate-ipq-wifi-package,tplink_tl-wa1201-v2,TP-Link TL-WA1201 V2))
 $(eval $(call generate-ipq-wifi-package,ubnt_u7-pro-xgs,Ubiquiti UniFi 7 Pro XGS))
+$(eval $(call generate-ipq-wifi-package,ubnt_unifi-6-pro,Ubiquiti UniFi 6 Pro))
 $(eval $(call generate-ipq-wifi-package,ubnt_utr,Ubiquiti UniFi Travel Router))
 $(eval $(call generate-ipq-wifi-package,wallys_dr40x9,Wallys DR40X9))
 $(eval $(call generate-ipq-wifi-package,wallys_dr5018s,Wallys DR5018S))
